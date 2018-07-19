@@ -6,17 +6,26 @@ from sklearn.preprocessing import RobustScaler
 import matplotlib.pyplot as plt
 import math
 import random
+from progressbar import ProgressBar
+
 
 class rl_agent:
-    def __init__(self,env,min_states=2,alpha=0.01,cluster_buffer=10):
+    def __init__(self,env,min_states=2,cluster_buffer=1000,discount_factor=0.1,alpha=0.1,dynamic=False):
+        #initialise environment
+
+        self.env = gym.make(env)
+        self.alpha = alpha
+        self.dynamic = dynamic
+        self.discount_factor = discount_factor
+        #set the step size parameter
+        self.step = 0
         #record the initial action space
-        self.num_actions = env.action_space.n
+        self.num_actions = self.env.action_space.n
         #render the environment to see the initial observation space
-        self.env = env
         self.num_observations = len(self.env.reset())
         #initialise the q table with only two states
-        self.q_table = np.array([0.0 for i in range(min_states)]*self.num_actions)
-        self.q_table = self.q_table.reshape(min_states,self.num_actions)
+        self.q_table = np.zeros([min_states,self.env.action_space.n])
+
         #set the experience to zero
         self.experience = 0
         #provide initial observation for historical data
@@ -31,12 +40,15 @@ class rl_agent:
             if done:
                 self.env.reset()
 
-        self.rescale_observations()
+        self.rescale_observations(new=True)
         self.cluster_centers = self.create_clusters()
         self.explorations_since_reclustering = 0
 
-        #set the alpha value
-        self.alpha = alpha
+    def get_explore_rate(self,epsilon,t):
+        return max(epsilon, min(1, 1.0 - math.log10((t+1)/25)))
+
+    def get_learning_rate(self,t):
+        return max(self.alpha, min(0.5, 1.0 - math.log10((t+1)/25)))
 
     def required_states(self):
         full_rows = 0
@@ -50,11 +62,11 @@ class rl_agent:
         else:
             return self.num_states
 
-    def recluster(self):
+    def recluster(self,rescale=False,verbose=False):
         self.rescale_observations()
 
         required_states = self.required_states()
-
+        print(required_states)
         new_classifer = KMeans(n_clusters=required_states)
         new_classifer.fit(self.scaled_observation_data)
 
@@ -68,7 +80,8 @@ class rl_agent:
         new_q_table = self.q_table
 
         for i in range(len(self.state_classifier.cluster_centers_)):
-            print("{} integrated into {}".format(i,new_clusters[i]))
+            if verbose:
+                print("{} integrated into {}".format(i,new_clusters[i]))
             for action in range(self.num_actions):
                 new_q_table[new_clusters[i],action] = self.q_table[i,action]
 
@@ -77,79 +90,103 @@ class rl_agent:
         self.num_states = required_states
 
 
-    def create_clusters(self):
+    def create_clusters(self,scaled=False):
         self.state_classifier = KMeans(n_clusters=self.num_states)
-        self.state_classifier.fit(self.scaled_observation_data)
+
+        if scaled:
+            self.state_classifier.fit(self.scaled_observation_data)
+        else:
+            self.state_classifier.fit(self.observation_data)
+
         return self.state_classifier.cluster_centers_
 
-    def rescale_observations(self):
+    def rescale_observations(self,new=False):
         #create scaler for data
-        self.scaler = RobustScaler()
-        self.scaler.fit(self.observation_data)
+        if new:
+            self.scaler = RobustScaler()
+            self.scaler.fit(self.observation_data)
+
         self.scaled_observation_data = self.scaler.transform(self.observation_data)
 
-    def update_q_table(self,action,reward):
-        self.q_table[self.state,action] = self.q_table[self.state,action] + self.alpha*(reward - self.q_table[self.state,action])
+    def update_q_table(self,action,reward,t):
+        if self.dynamic:
+            self.q_table[self.state,action] = self.q_table[self.state,action] + self.alpha*(reward - self.discount_factor*np.max(self.q_table[self.state_prime,:]) - self.q_table[self.state,action])
+        else:
+            self.q_table[self.state,action] = self.q_table[self.state,action] + self.get_learning_rate(t)*(reward - self.discount_factor*np.max(self.q_table[self.state_prime,:]) - self.q_table[self.state,action])
 
     def decide_action(self):
-        chosen_action = None
-        q_a = None
-        for action in range(self.num_actions):
-            if chosen_action is not None:
-                if self.q_table[self.state,action] > q_a:
-                    chosen_action = action
-                    q_a = self.q_table[self.state,action]
-                else:
-                    None
-            else:
-                chosen_action = action
-                q_a = self.q_table[self.state,action]
+        return np.argmax(self.q_table[self.state,])
 
-        return chosen_action
+    def define_state(self,observation,scaled=False):
+        if scaled:
+            observation = self.scaler.transform(np.asarray([observation]))[0]
+        return self.state_classifier.predict([observation])[0]
 
-    def define_state(self,observation):
-        scaled_observation = self.scaler.transform(np.asarray([observation]))[0]
-        self.state = self.state_classifier.predict([scaled_observation])[0]
+    def practice(self,max_t=200,visible=False,episodes=1,epsilon=0.05,verbose=False,record=False):
+        pbar = ProgressBar()
 
-    def practice(self,max_t=200,visible=False,episodes=1,exploration_rate=0.05):
-        for episode in range(episodes):
+        previous_episode_performance = None
+
+        if record:
+            episode_performance = []
+
+        for episode in pbar(range(episodes)):
+            self.step = 0
+            episode_rewards = 0
             observation = self.env.reset()
+
 
             for t in range(max_t):
 
                 if visible:
                     self.env.render()
 
-                self.define_state(observation)
+                self.state = self.define_state(observation)
                 #explore vs exploit
-                if random.uniform(0,1) >= exploration_rate:
+                random_float = random.uniform(0,1)
+                if random_float >= epsilon:
                     action = self.decide_action()
-                    observation,reward,done,info = self.env.step(action)
-                    self.update_q_table(action=action,reward=reward)
                 else:
-                    print("Exploring")
-                    self.explorations_since_reclustering += 1
+                    if verbose:
+                        print("Exploring")
                     action = self.env.action_space.sample()
-                    observation,reward,done,info = self.env.step(action)
 
+                observation,reward,done,info = self.env.step(action)
+                self.step += 1
+                self.state_prime = self.define_state(observation)
 
-
-                if self.explorations_since_reclustering > int(0.1*self.observation_data.shape[0]):
-                    print(self.q_table)
-                    print("Updating clusters")
-                    print(self.q_table)
-                    self.recluster()
-                    self.define_state(observation)
-                    self.explorations_since_reclustering = 0
+                episode_rewards += reward
 
                 if done:
-                    print("Episode {} complete with {} steps".format(episode+1,t+1))
+                    self.update_q_table(action=action,reward=0,t=t)
+                else:
+                    self.update_q_table(action=action,reward=episode_rewards,t=t)
+
+
+
+
+                if done:
+                    if verbose:
+                        print("Episode {} complete with {} steps".format(episode+1,t+1))
+
+                    if record:
+                        episode_performance.append({'episode':episode+1,'steps':t+1})
+                    """
+                    if previous_episode_performance != None:
+                        if t+1 <= 0.1*previous_episode_performance:
+                            if verbose:
+                                print("reclustering")
+                            self.recluster(verbose=verbose)
+
+
+                    if episode > 0:
+                        previous_episode_performance = t+1
+                    """
+
 
                     break
 
         self.env.close()
 
-agent = rl_agent(env=gym.make('CartPole-v1'),min_states=10,alpha=0.99)
-print(agent.q_table)
-agent.practice(episodes=500)
-print(agent.q_table)
+        if record:
+            return episode_performance
