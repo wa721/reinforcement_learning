@@ -1,7 +1,7 @@
 import gym
 import numpy as np
 import pandas as pd
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans,SpectralClustering,AffinityPropagation
 from sklearn.preprocessing import RobustScaler
 import matplotlib.pyplot as plt
 import math
@@ -10,7 +10,7 @@ from progressbar import ProgressBar
 
 
 class rl_agent:
-    def __init__(self,env,min_states=2,cluster_buffer=1000,discount_factor=0.1,alpha=0.1,dynamic=False):
+    def __init__(self,env,min_states=2,discount_factor=0.1,alpha=0.1,dynamic=False):
         #initialise environment
 
         self.env = gym.make(env)
@@ -25,6 +25,7 @@ class rl_agent:
         self.num_observations = len(self.env.reset())
         #initialise the q table with only two states
         self.q_table = np.zeros([min_states,self.env.action_space.n])
+        self.step_sizes = np.zeros([min_states,])
 
         #set the experience to zero
         self.experience = 0
@@ -33,7 +34,7 @@ class rl_agent:
         self.observation_data = np.array([observation])
         #fill out the historical observation data for the minimum number of state clusters
         self.num_states = min_states
-        for t in range(self.num_states*cluster_buffer):
+        for t in range(self.num_states):
             action = self.env.action_space.sample()
             observation, reward, done, info = self.env.step(action)
             self.observation_data = np.append(self.observation_data,[observation],axis=0)
@@ -68,7 +69,8 @@ class rl_agent:
         required_states = self.required_states()
         print(required_states)
         new_classifer = KMeans(n_clusters=required_states)
-        new_classifer.fit(self.scaled_observation_data)
+
+        new_classifer.fit(self.observation_data)
 
         #convert the cluster centers
         new_clusters = new_classifer.predict(self.state_classifier.cluster_centers_)
@@ -90,8 +92,8 @@ class rl_agent:
         self.num_states = required_states
 
 
-    def create_clusters(self,scaled=False):
-        self.state_classifier = KMeans(n_clusters=self.num_states)
+    def create_clusters(self,scaled=True):
+        self.state_classifier = AffinityPropagation()#SpectralClustering(n_clusters=self.num_states)
 
         if scaled:
             self.state_classifier.fit(self.scaled_observation_data)
@@ -110,28 +112,28 @@ class rl_agent:
 
     def update_q_table(self,action,reward,t):
         if self.dynamic:
-            self.q_table[self.state,action] = self.q_table[self.state,action] + self.alpha*(reward - self.discount_factor*np.max(self.q_table[self.state_prime,:]) - self.q_table[self.state,action])
+            self.q_table[self.state,action] = self.q_table[self.state,action] + self.get_learning_rate(t=t)*(reward + self.discount_factor*np.max(self.q_table[self.state_prime,:]) - self.q_table[self.state,action])
         else:
-            self.q_table[self.state,action] = self.q_table[self.state,action] + self.get_learning_rate(t)*(reward - self.discount_factor*np.max(self.q_table[self.state_prime,:]) - self.q_table[self.state,action])
+            self.q_table[self.state,action] = self.q_table[self.state,action] + 1/self.step*(reward + self.discount_factor*np.max(self.q_table[self.state_prime,:]) - self.q_table[self.state,action])
 
     def decide_action(self):
         return np.argmax(self.q_table[self.state,])
 
-    def define_state(self,observation,scaled=False):
+    def define_state(self,observation,scaled=True):
         if scaled:
             observation = self.scaler.transform(np.asarray([observation]))[0]
         return self.state_classifier.predict([observation])[0]
 
     def practice(self,max_t=200,visible=False,episodes=1,epsilon=0.05,verbose=False,record=False):
         pbar = ProgressBar()
-
+        self.step = 0
         previous_episode_performance = None
 
         if record:
             episode_performance = []
 
         for episode in pbar(range(episodes)):
-            self.step = 0
+
             episode_rewards = 0
             observation = self.env.reset()
 
@@ -144,7 +146,7 @@ class rl_agent:
                 self.state = self.define_state(observation)
                 #explore vs exploit
                 random_float = random.uniform(0,1)
-                if random_float >= epsilon:
+                if random_float >= self.get_explore_rate(epsilon=epsilon,t=t):
                     action = self.decide_action()
                 else:
                     if verbose:
@@ -153,12 +155,13 @@ class rl_agent:
 
                 observation,reward,done,info = self.env.step(action)
                 self.step += 1
+                self.step_sizes[self.state,] += 1
                 self.state_prime = self.define_state(observation)
 
                 episode_rewards += reward
 
                 if done:
-                    self.update_q_table(action=action,reward=0,t=t)
+                    self.update_q_table(action=action,reward=-1,t=t)
                 else:
                     self.update_q_table(action=action,reward=episode_rewards,t=t)
 
@@ -171,17 +174,6 @@ class rl_agent:
 
                     if record:
                         episode_performance.append({'episode':episode+1,'steps':t+1})
-                    """
-                    if previous_episode_performance != None:
-                        if t+1 <= 0.1*previous_episode_performance:
-                            if verbose:
-                                print("reclustering")
-                            self.recluster(verbose=verbose)
-
-
-                    if episode > 0:
-                        previous_episode_performance = t+1
-                    """
 
 
                     break
