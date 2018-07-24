@@ -93,7 +93,7 @@ class rl_agent:
 
 
     def create_clusters(self,scaled=True):
-        self.state_classifier = AffinityPropagation()#SpectralClustering(n_clusters=self.num_states)
+        self.state_classifier = KMeans(n_clusters=self.num_states)
 
         if scaled:
             self.state_classifier.fit(self.scaled_observation_data)
@@ -112,12 +112,10 @@ class rl_agent:
 
     def update_q_table(self,action,reward,t):
         if self.dynamic:
-            self.q_table[self.state,action] = self.q_table[self.state,action] + self.get_learning_rate(t=t)*(reward + self.discount_factor*np.max(self.q_table[self.state_prime,:]) - self.q_table[self.state,action])
+            self.q_table[self.state_0,action] = self.q_table[self.state_0,action] + self.alpha*(reward + self.discount_factor*np.max(self.q_table[self.state,:]) - self.q_table[self.state_0,action])
         else:
-            self.q_table[self.state,action] = self.q_table[self.state,action] + 1/self.step*(reward + self.discount_factor*np.max(self.q_table[self.state_prime,:]) - self.q_table[self.state,action])
+            self.q_table[self.state_0,action] = self.q_table[self.state_0,action] + 1/self.step*(reward + self.discount_factor*np.max(self.q_table[self.state,:]) - self.q_table[self.state_0,action])
 
-    def decide_action(self):
-        return np.argmax(self.q_table[self.state,])
 
     def define_state(self,observation,scaled=True):
         if scaled:
@@ -137,36 +135,42 @@ class rl_agent:
             episode_rewards = 0
             observation = self.env.reset()
 
+            self.state_0 = self.define_state(observation=observation)
+            exploring = False
 
             for t in range(max_t):
 
                 if visible:
                     self.env.render()
 
-                self.state = self.define_state(observation)
                 #explore vs exploit
-                random_float = random.uniform(0,1)
-                if random_float >= self.get_explore_rate(epsilon=epsilon,t=t):
-                    action = self.decide_action()
+                if random.uniform(0,1) >= epsilon:
+                    action = np.argmax(self.q_table[self.state_0,])
+                    exploring = False
+
                 else:
-                    if verbose:
-                        print("Exploring")
                     action = self.env.action_space.sample()
+                    exploring = True
 
                 observation,reward,done,info = self.env.step(action)
+
+                self.state = self.define_state(observation)
+
                 self.step += 1
                 self.step_sizes[self.state,] += 1
-                self.state_prime = self.define_state(observation)
 
-                episode_rewards += reward
 
                 if done:
-                    self.update_q_table(action=action,reward=-1,t=t)
+                    reward = -1.0
                 else:
-                    self.update_q_table(action=action,reward=episode_rewards,t=t)
+                    reward = 0.0
 
+                if exploring:
+                    None #do not learn
+                else:
+                    self.update_q_table(action=action,reward=reward,t=t)
 
-
+                self.state_0 = self.state
 
                 if done:
                     if verbose:
